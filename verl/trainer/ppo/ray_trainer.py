@@ -537,12 +537,16 @@ class RayTrainer(object):
                         newbatch.non_tensor_batch['uid'] = np.array([str(uuid.uuid4()) for _ in range(len(newbatch.batch))],
                                                              dtype=object)
 
-                        batch_lst = sum([[newbatch[i:i + 1] for _ in range(n_samples)] for i in range(len(newbatch))],
+                        # TTRL: distinguish between voting samples and training samples
+                        n_votes = getattr(self.config, 'n_votes_per_prompt', n_samples) if hasattr(self.config, 'test_time_rl') and self.config.test_time_rl else n_samples
+                        
+                        # Generate copies for all voting trajectories
+                        batch_lst = sum([[newbatch[i:i + 1] for _ in range(n_votes)] for i in range(len(newbatch))],
                                         [])
-
+                        
                         gen_batch.meta_info = {
                             'eos_token_id': self.tokenizer.eos_token_id,
-                            'n_samples': n_samples,
+                            'n_samples': n_votes,  # Generate n_votes trajectories for voting/selection
                             'pad_token_id': self.tokenizer.pad_token_id,
                         }
                         
@@ -574,6 +578,14 @@ class RayTrainer(object):
                             metrics['train_verify_score_wo_format/' + k].append(v)    
                             
                     metrics['timing/verify'] += timer.last
+                    
+                    # TTRL: Select best-of-N trajectories based on success rate
+                    if hasattr(self.config, 'test_time_rl') and self.config.test_time_rl:
+                        n_votes = getattr(self.config, 'n_votes_per_prompt', n_samples)
+                        if n_votes > n_samples:
+                            # Select top-k trajectories per prompt
+                            roll_batch = self._select_best_trajectories(roll_batch, n_votes, n_samples)
+                            print(f"TTRL: Selected {len(roll_batch)} / {len(gen_batch_output)} trajectories (top-{n_samples} from {n_votes} per prompt)")
                     
                     # do accuracy filtering and score logging
                     with Timer(name='acc&trunc_filter', text="{name}: {seconds:.1f} seconds") as timer:
@@ -757,6 +769,53 @@ class RayTrainer(object):
         print(f"Filtered format batch size: {len(filtered_batch)} (from original size: {len(batch)})")
         
         return filtered_batch
+
+    def _select_best_trajectories(self, batch, n_votes, n_train_samples):
+        """
+        TTRL: Select top-k trajectories per prompt based on success rate.
+        This is the best-of-N selection step in TTRL.
+        
+        Args:
+            batch: DataProto containing all trajectories
+            n_votes: Number of trajectories generated per prompt (for voting)
+            n_train_samples: Number of trajectories to select per prompt (for training)
+        
+        Returns:
+            DataProto: Selected trajectories
+        """
+        assert len(batch) % n_votes == 0, f"Batch size {len(batch)} must be divisible by n_votes {n_votes}"
+        num_prompts = len(batch) // n_votes
+        
+        # Get success indicators for each trajectory
+        # Assuming 'complete' field indicates success
+        if 'complete' in batch.batch:
+            success_scores = batch.batch['complete'].float()
+        elif 'acc' in batch.batch:
+            success_scores = batch.batch['acc']
+        else:
+            # Fallback: use finish_step (shorter is better)
+            success_scores = -batch.batch['finish_step'].float()
+        
+        # Reshape to (num_prompts, n_votes)
+        success_matrix = success_scores.reshape(num_prompts, n_votes)
+        
+        # Select top-k indices per prompt
+        selected_indices = []
+        for i in range(num_prompts):
+            # Get top-k indices for this prompt
+            _, top_k_idx = torch.topk(success_matrix[i], min(n_train_samples, n_votes))
+            # Convert to global indices
+            global_idx = i * n_votes + top_k_idx
+            selected_indices.extend(global_idx.tolist())
+        
+        # Create selection mask
+        selection_mask = torch.zeros(len(batch), dtype=torch.bool, device=success_scores.device)
+        selection_mask[selected_indices] = True
+        
+        # Apply mask to batch
+        selected_batch = batch.slice(selection_mask)
+        
+        return selected_batch
 
     def filter(self, reward_tensor, batch, n_samples):
         """
