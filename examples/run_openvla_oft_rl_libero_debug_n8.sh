@@ -1,6 +1,6 @@
 #!/bin/bash
-# SimpleVLA-RL Multi-Sample Training Script with Optional TTRL
-# Default保持Test-Time RL效率奖励，可通过切换开关回退到纯成功率
+# Debug script: Exact original parameters (n_samples=8, original settings)
+# This ensures we're matching the original working configuration exactly
 
 set -x
 
@@ -12,8 +12,8 @@ export CUDA_LAUNCH_BLOCKING=1
 export TORCH_USE_CUDA_DSA=1
 export ROBOT_PLATFORM=LIBERO
 
-PROJECT_NAME='SimpleVLA-RL-TTRL'
-EXPERIMENT_NAME='SimpleVLA-RL-TTRL-8samples'  # Change this for your experiments
+PROJECT_NAME='SimpleVLA-RL'
+EXPERIMENT_NAME='DEBUG-8samples-exact-original'
 
 # Model and data paths
 SFT_MODEL_PATH="YOUR SFT_MODEL_PATH"
@@ -26,46 +26,17 @@ NUM_GPUS=8
 NUM_NODES=1
 ALIGN_PATH="YOUR PATH TO SimpleVLA-RL/align.json"
 
-# Multi-sample inference & TTRL配置
-N_SAMPLES=4  # Number of trajectories to use for training
-N_VOTES=8   # Number of trajectories to generate for voting/selection (set to N_SAMPLES if not using TTRL selection)
-BASE_TEMPERATURE=1.6
-TEMPERATURE_RANGE=0.0
-ENABLE_TTRL=True  # 切换为 False 即可关闭效率奖励
-TTRL_REWARD_MODE=efficiency  # 可选: efficiency / binary
-
-echo "Starting Test-Time RL training with $N_SAMPLES samples per task..."
-echo "Generate $N_VOTES trajectories, select top-$N_SAMPLES for training"
-echo "Base temperature: $BASE_TEMPERATURE"
-echo "Enable TTRL mode: $ENABLE_TTRL"
-if [ "$ENABLE_TTRL" = "True" ]; then
-    echo "Temperature range: $TEMPERATURE_RANGE"
-    echo "TTRL reward mode: $TTRL_REWARD_MODE"
-fi
+echo "Starting DEBUG run: EXACT ORIGINAL parameters (n_samples=8)..."
 
 bash examples/overwrite_vla_ckpt_utils.sh $SFT_MODEL_PATH 
-
-ACCURACY_LOWER=0.1
-ACCURACY_UPPER=0.9
-
-HYDRA_ARGS=("+test_time_rl=$ENABLE_TTRL")
-if [ "$ENABLE_TTRL" = "True" ]; then
-    HYDRA_ARGS+=("+base_temperature=$BASE_TEMPERATURE")
-    HYDRA_ARGS+=("+temperature_range=$TEMPERATURE_RANGE")
-    HYDRA_ARGS+=("+enable_test_time_rl=True")
-    HYDRA_ARGS+=("+ttrl_reward_mode=$TTRL_REWARD_MODE")
-    HYDRA_ARGS+=("+n_votes_per_prompt=$N_VOTES")
-else
-    HYDRA_ARGS+=("+ttrl_reward_mode=binary")
-fi
 
 HYDRA_FULL_ERROR=1 python -u -m verl.trainer.main_ppo \
     data.task_suite_name=$DATASET_NAME \
     data.num_trials_per_task=50 \
-    data.n_samples=$N_SAMPLES \
+    data.n_samples=8 \
     data.filter_accuracy=True \
-    data.accuracy_lower_bound=$ACCURACY_LOWER \
-    data.accuracy_upper_bound=$ACCURACY_UPPER \
+    data.accuracy_lower_bound=0.1 \
+    data.accuracy_upper_bound=0.9 \
     data.oversample_factor=1 \
     data.train_batch_size=64 \
     data.val_batch_size=496 \
@@ -127,7 +98,6 @@ HYDRA_FULL_ERROR=1 python -u -m verl.trainer.main_ppo \
     trainer.runtime_env=$ALIGN_PATH \
     trainer.wandb_mode=online \
     trainer.val_before_train=True \
-    "${HYDRA_ARGS[@]}" \
     "$@"
 
-echo "Training completed!"
+echo "Debug run with n_samples=8 completed!"

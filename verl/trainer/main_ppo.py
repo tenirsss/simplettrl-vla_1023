@@ -35,6 +35,8 @@ class RobRewardManager():
         self.config = config
         # Test-Time RL mode: use efficiency-based rewards instead of 0/1
         self.test_time_rl_mode = config.get("test_time_rl", False)
+        # Reward shaping strategy when TTRL is enabled: efficiency (default) or binary etc.
+        self.ttrl_reward_mode = config.get("ttrl_reward_mode", "efficiency")
 
     def verify(self, data):
         """Compute efficiency-based rewards for test-time RL."""
@@ -46,18 +48,20 @@ class RobRewardManager():
         
         score = []
         if self.test_time_rl_mode:
-            # Efficiency-based reward: reward = success / steps
-            # Higher reward for completing in fewer steps
-            for complete, steps in zip(completes, finish_steps):
-                if complete:
-                    # Normalize: reward = 1.0 / (steps / max_steps)
-                    # This encourages efficiency: completing in half steps gets 2x reward
-                    max_steps = self.config.actor_rollout_ref.model.max_steps if hasattr(self.config.actor_rollout_ref.model, 'max_steps') else 500
-                    efficiency_reward = 1.0 / (1.0 + steps / max_steps)  # Range: [0, 1]
-                    score.append(efficiency_reward)
-                else:
-                    # Failed trajectory gets 0 reward
-                    score.append(0.0)
+            reward_mode = str(self.ttrl_reward_mode).lower()
+            if reward_mode in {"efficiency", "eff"}:
+                # Efficiency-based reward: reward = success / steps, higher when finishing faster
+                for complete, steps in zip(completes, finish_steps):
+                    if complete:
+                        max_steps = self.config.actor_rollout_ref.model.max_steps if hasattr(self.config.actor_rollout_ref.model, 'max_steps') else 500
+                        efficiency_reward = 1.0 / (1.0 + steps / max_steps)  # Range: [0, 1]
+                        score.append(efficiency_reward)
+                    else:
+                        score.append(0.0)
+            elif reward_mode in {"binary", "success"}:
+                score = [1.0 if complete else 0.0 for complete in completes]
+            else:
+                raise ValueError(f"Unsupported TTRL reward mode: {self.ttrl_reward_mode}")
         else:
             # Standard 0/1 reward
             score = [float(item) for item in completes]
@@ -72,6 +76,7 @@ class RobRewardManager():
         reward_format_metrics = {}
             
         reward_metrics['all'] = data.batch['acc'].mean().item()
+        reward_metrics['success_rate'] = float(sum(completes) / len(completes)) if len(completes) > 0 else 0.0
         format_metrics['all'] = data.batch['format_correctness'].mean().item()
         reward_format_metrics['all'] = data.batch['acc'].mean().item()
 
